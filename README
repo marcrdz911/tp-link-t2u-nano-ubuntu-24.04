@@ -1,0 +1,346 @@
+# TP-Link Archer T2U Nano `2357:011e` on Ubuntu Server 24.04 / Kernel 6.8
+
+Working fix for **TP-Link Archer T2U Nano AC600** on **Ubuntu Server 24.04.4 LTS** with **kernel 6.8.0-139-generic**, using the `lwfinger/rtw88` DKMS driver.
+
+---
+
+## Tested environment
+
+| Item | Value |
+|---|---|
+| Ubuntu Server | 24.04.4 LTS |
+| Kernel | 6.8.0-139-generic |
+| Adapter | TP-Link Archer T2U Nano |
+| USB ID | `2357:011e` |
+| Chipset family | RTL8811AU / RTL8821AU |
+| Secure Boot | Disabled |
+
+The final working solution was the **`lwfinger/rtw88` DKMS backport**, which provides the `rtw_8821au` module.
+
+---
+
+## 1. Identify the adapter
+
+Run:
+
+```bash
+lsusb
+```
+
+Mine showed:
+
+```text
+ID 2357:011e TP-Link AC600 wireless Realtek RTL8811AU [Archer T2U Nano]
+```
+
+Before installing a driver, also check whether Linux already created a Wi-Fi interface:
+
+```bash
+iw dev
+ip link
+```
+
+In my case, there was no wireless interface initially.
+
+---
+
+## 2. What did not work
+
+### Ubuntu `rtl8812au-dkms` package
+
+I first tried:
+
+```bash
+sudo apt install -y rtl8812au-dkms
+sudo modprobe 8812au
+```
+
+The module loaded, but the adapter never appeared in:
+
+```bash
+iw dev
+```
+
+Checking the driver aliases showed that the packaged module did not include the exact USB ID `2357:011e`:
+
+```bash
+modinfo 8812au | grep -i 2357
+```
+
+The package was removed:
+
+```bash
+sudo apt remove -y rtl8812au-dkms
+```
+
+---
+
+### Another `rtl8812au` GitHub driver
+
+I also tried another `rtl8812au` repository that appeared to list the adapter as supported.
+
+The source contained the device entry:
+
+```text
+2357:011e
+```
+
+but the RTL8821A path was disabled in the Makefile:
+
+```text
+CONFIG_RTL8821A = n
+```
+
+After enabling it, the build failed because required RTL8821A source files were missing.
+
+That path was abandoned.
+
+---
+
+### Legacy `8821au-20210708` driver
+
+I then tried the dedicated RTL8811AU / RTL8821AU driver.
+
+It recognized `2357:011e` as a supported device, but on Ubuntu 24.04 / kernel 6.8 it failed during DKMS compilation because of `cfg80211` API type mismatches.
+
+Representative errors:
+
+```text
+error: passing argument 1 of 'cfg80211_new_sta' from incompatible pointer type
+error: passing argument 1 of 'cfg80211_del_sta' from incompatible pointer type
+```
+
+Several `cfg80211_ops` callbacks also expected:
+
+```text
+struct net_device *
+```
+
+while the driver supplied:
+
+```text
+struct wireless_dev *
+```
+
+That driver was removed before continuing.
+
+---
+
+## 3. Working solution: `lwfinger/rtw88`
+
+Install the build requirements:
+
+```bash
+sudo apt update
+sudo apt install -y git dkms build-essential linux-headers-generic iw
+```
+
+Create a source folder:
+
+```bash
+mkdir -p ~/src
+cd ~/src
+```
+
+Clone the driver:
+
+```bash
+git clone https://github.com/lwfinger/rtw88.git
+cd rtw88
+```
+
+Install it through DKMS:
+
+```bash
+sudo dkms install $PWD
+```
+
+On my system, DKMS successfully built and installed modules including:
+
+```text
+rtw_core
+rtw_usb
+rtw_8821a
+rtw_8821au
+```
+
+Verify:
+
+```bash
+dkms status
+```
+
+You should see an installed `rtw88` entry for your running kernel.
+
+Install the firmware:
+
+```bash
+sudo make install_fw
+```
+
+Copy the module configuration:
+
+```bash
+sudo cp rtw88.conf /etc/modprobe.d/
+```
+
+Then reboot:
+
+```bash
+sudo reboot
+```
+
+---
+
+## 4. Verify after reboot
+
+Run:
+
+```bash
+iw dev
+```
+
+The adapter finally appeared as a managed wireless interface:
+
+```text
+phy#0
+    Interface wlx40ed008a623c
+        ifindex 3
+        wdev 0x1
+        addr 40:ed:00:8a:62:3c
+        type managed
+```
+
+Also check:
+
+```bash
+ip link
+```
+
+The interface appeared as:
+
+```text
+3: wlx40ed008a623c: <BROADCAST,MULTICAST> ...
+```
+
+At this point the driver is working.
+
+The interface may still show `state DOWN` until it is brought up and connected to a Wi-Fi network.
+
+---
+
+## 5. Bring the interface up
+
+Use your actual interface name:
+
+```bash
+sudo ip link set wlx40ed008a623c up
+```
+
+Then scan:
+
+```bash
+sudo iw dev wlx40ed008a623c scan | grep SSID
+```
+
+My Wi-Fi network appeared successfully in the scan, confirming the adapter and driver were operating correctly.
+
+---
+
+## 6. Why the USB ID matters
+
+With USB Wi-Fi adapters, the marketing name alone is not enough.
+
+Always check:
+
+```bash
+lsusb
+```
+
+and research Linux support using the exact **vendor:product ID**.
+
+For this adapter:
+
+```text
+2357:011e
+```
+
+is the useful identifier.
+
+---
+
+## 7. Avoid multiple competing out-of-tree drivers
+
+Before trying another driver, check:
+
+```bash
+dkms status
+```
+
+Remove failed or conflicting DKMS modules before installing another one.
+
+Multiple drivers attempting to claim the same Realtek adapter can make troubleshooting much harder.
+
+---
+
+## 8. Kernel updates
+
+Because this installation uses DKMS, the module should be rebuilt automatically when compatible new kernels are installed.
+
+After a major kernel update, it is still worth checking:
+
+```bash
+dkms status
+iw dev
+```
+
+---
+
+## Short version
+
+For:
+
+```text
+Ubuntu Server 24.04.4 LTS
+Kernel 6.8.0-139-generic
+TP-Link Archer T2U Nano
+USB ID 2357:011e
+```
+
+the working path in my case was:
+
+```bash
+sudo apt update
+sudo apt install -y git dkms build-essential linux-headers-generic iw
+
+mkdir -p ~/src
+cd ~/src
+
+git clone https://github.com/lwfinger/rtw88.git
+cd rtw88
+
+sudo dkms install $PWD
+sudo make install_fw
+sudo cp rtw88.conf /etc/modprobe.d/
+
+sudo reboot
+```
+
+After reboot:
+
+```bash
+iw dev
+ip link
+```
+
+The Wi-Fi interface appeared successfully.
+
+---
+
+## Why I am sharing this
+
+This took several driver attempts and a fair amount of troubleshooting to isolate.
+
+I am posting it so the next person with the same USB ID and Ubuntu/kernel combination has a much shorter path to a working system.
+
+If your kernel, adapter revision, or USB ID is different, verify support before assuming the exact same steps will work.
